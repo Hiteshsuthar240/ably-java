@@ -3,12 +3,12 @@ package io.ably.lib.objects.type.livemap
 import io.ably.lib.objects.*
 import io.ably.lib.objects.ObjectData
 import io.ably.lib.objects.ObjectsPool
-import io.ably.lib.objects.ObjectsPoolDefaults
 import io.ably.lib.objects.type.BaseRealtimeObject
 import io.ably.lib.objects.type.ObjectType
 import io.ably.lib.objects.type.counter.LiveCounter
 import io.ably.lib.objects.type.map.LiveMap
 import io.ably.lib.objects.type.map.LiveMapValue
+import java.util.Base64
 
 /**
  * @spec RTLM3 - Map data structure storing entries
@@ -45,14 +45,25 @@ internal fun LiveMapEntry.isEntryOrRefTombstoned(objectsPool: ObjectsPool): Bool
 internal fun LiveMapEntry.getResolvedValue(objectsPool: ObjectsPool): LiveMapValue? {
   if (isTombstoned) { return null } // RTLM5d2a
 
-  data?.value?.let { return fromObjectValue(it) } // RTLM5d2b, RTLM5d2c, RTLM5d2d, RTLM5d2e
-
-  data?.objectId?.let { refId -> // RTLM5d2f -has an objectId reference
-    objectsPool.get(refId)?.let { refObject ->
-      if (refObject.isTombstoned) {
-        return null // tombstoned objects must not be surfaced to the end users
+  data?.let { d -> // RTLM5d2b, RTLM5d2c, RTLM5d2d, RTLM5d2e
+    d.string?.let { return LiveMapValue.of(it) }
+    d.number?.let { return LiveMapValue.of(it) }
+    d.boolean?.let { return LiveMapValue.of(it) }
+    d.bytes?.let { return LiveMapValue.of(Base64.getDecoder().decode(it)) }
+    d.json?.let { parsed ->
+      return when {
+        parsed.isJsonObject -> LiveMapValue.of(parsed.asJsonObject)
+        parsed.isJsonArray -> LiveMapValue.of(parsed.asJsonArray)
+        else -> null
       }
-      return fromRealtimeObject(refObject) // RTLM5d2f2
+    }
+    d.objectId?.let { refId -> // RTLM5d2f - has an objectId reference
+      objectsPool.get(refId)?.let { refObject ->
+        if (refObject.isTombstoned) {
+          return null // tombstoned objects must not be surfaced to the end users
+        }
+        return fromRealtimeObject(refObject) // RTLM5d2f2
+      }
     }
   }
   return null // RTLM5d2g, RTLM5d2f1
@@ -61,20 +72,9 @@ internal fun LiveMapEntry.getResolvedValue(objectsPool: ObjectsPool): LiveMapVal
 /**
  * Extension function to check if a LiveMapEntry is expired and ready for garbage collection
  */
-internal fun LiveMapEntry.isEligibleForGc(): Boolean {
+internal fun LiveMapEntry.isEligibleForGc(gcGracePeriod: Long): Boolean {
   val currentTime = System.currentTimeMillis()
-  return isTombstoned && tombstonedAt?.let { currentTime - it >= ObjectsPoolDefaults.GC_GRACE_PERIOD_MS } == true
-}
-
-private fun fromObjectValue(objValue: ObjectValue): LiveMapValue {
-  return when (objValue) {
-    is ObjectValue.String -> LiveMapValue.of(objValue.value)
-    is ObjectValue.Number -> LiveMapValue.of(objValue.value)
-    is ObjectValue.Boolean -> LiveMapValue.of(objValue.value)
-    is ObjectValue.Binary -> LiveMapValue.of(objValue.value.data)
-    is ObjectValue.JsonObject -> LiveMapValue.of(objValue.value)
-    is ObjectValue.JsonArray -> LiveMapValue.of(objValue.value)
-  }
+  return isTombstoned && tombstonedAt?.let { currentTime - it >= gcGracePeriod } == true
 }
 
 private fun fromRealtimeObject(realtimeObject: BaseRealtimeObject): LiveMapValue {

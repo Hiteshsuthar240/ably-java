@@ -17,7 +17,11 @@ import io.ably.lib.types.PaginatedResult;
 import io.ably.lib.types.Param;
 import io.ably.lib.types.PresenceMessage;
 import io.ably.lib.types.PresenceSerializer;
+import io.ably.lib.types.PublishResult;
+import io.ably.lib.types.UpdateDeleteResult;
 import io.ably.lib.util.Crypto;
+import org.jetbrains.annotations.Blocking;
+import org.jetbrains.annotations.NonBlocking;
 
 /**
  * A class representing a Channel in the Ably REST API.
@@ -57,12 +61,33 @@ public class ChannelBase {
      * @param data the message payload;
      * @throws AblyException
      */
+    @Blocking
     public void publish(String name, Object data) throws AblyException {
         publish(ably.http, name, data);
     }
 
+    @Blocking
     void publish(Http http, String name, Object data) throws AblyException {
         publishImpl(http, name, data).sync();
+    }
+
+    /**
+     * Publish a message on this channel using the REST API and return the result.
+     * Since the REST API is stateless, this request is made independently
+     * of any other request on this or any other channel.
+     * @param name the event name
+     * @param data the message payload;
+     * @return A {@link PublishResult} containing the message serial(s)
+     * @throws AblyException
+     */
+    @Blocking
+    public PublishResult publishWithResult(String name, Object data) throws AblyException {
+        return publishWithResult(ably.http, name, data);
+    }
+
+    @Blocking
+    PublishResult publishWithResult(Http http, String name, Object data) throws AblyException {
+        return publishImpl(http, name, data).sync();
     }
 
     /**
@@ -75,16 +100,40 @@ public class ChannelBase {
      * @param listener a listener to be notified of the outcome of this message.
      * <p>
      * This listener is invoked on a background thread.
+     * @deprecated Use {@link #publishAsync(String, Object, Callback)} instead.
      */
+    @Deprecated
     public void publishAsync(String name, Object data, CompletionListener listener) {
         publishAsync(ably.http, name, data, listener);
     }
 
+    @NonBlocking
     void publishAsync(Http http, String name, Object data, CompletionListener listener) {
-        publishImpl(http, name, data).async(new CompletionListener.ToCallback(listener));
+        publishImpl(http, name, data).async(new CompletionListener.ToCallback<>(listener));
     }
 
-    private Http.Request<Void> publishImpl(Http http, String name, Object data) {
+    /**
+     * Asynchronously publish a message on this channel using the REST API.
+     * Since the REST API is stateless, this request is made independently
+     * of any other request on this or any other channel.
+     *
+     * @param name the event name
+     * @param data the message payload;
+     * @param callback a callback to be notified of the outcome of this message with the {@link PublishResult}.
+     * <p>
+     * This callback is invoked on a background thread.
+     */
+    @NonBlocking
+    public void publishAsync(String name, Object data, Callback<PublishResult> callback) {
+        publishAsync(ably.http, name, data, callback);
+    }
+
+    @NonBlocking
+    void publishAsync(Http http, String name, Object data, Callback<PublishResult> callback) {
+        publishImpl(http, name, data).async(callback);
+    }
+
+    private Http.Request<PublishResult> publishImpl(Http http, String name, Object data) {
         return publishImpl(http, new Message[] {new Message(name, data)});
     }
 
@@ -96,12 +145,27 @@ public class ChannelBase {
      * @param messages array of messages to publish.
      * @throws AblyException
      */
+    @Blocking
     public void publish(final Message[] messages) throws AblyException {
         publish(ably.http, messages);
     }
 
+    @Blocking
     void publish(Http http, final Message[] messages) throws AblyException {
         publishImpl(http, messages).sync();
+    }
+
+    /**
+     * Publish an array of messages on this channel. When there are
+     * multiple messages to be sent, it is more efficient to use this
+     * method to publish them in a single request, as compared with
+     * publishing via multiple independent requests.
+     * @param messages array of messages to publish.
+     * @throws AblyException
+     */
+    @Blocking
+    public PublishResult publishWithResult(final Message[] messages) throws AblyException {
+        return publishImpl(ably.http, messages).sync();
     }
 
     /**
@@ -109,21 +173,38 @@ public class ChannelBase {
      *
      * @param messages the message
      * @param listener a listener to be notified of the outcome of this message.
+     * @deprecated Use {@link #publishAsync(Message[], Callback)} instead.
      * <p>
      * This listener is invoked on a background thread.
      */
+    @Deprecated
+    @NonBlocking
     public void publishAsync(final Message[] messages, final CompletionListener listener) {
         publishAsync(ably.http, messages, listener);
     }
 
+    @Deprecated
     void publishAsync(Http http, final Message[] messages, final CompletionListener listener) {
-        publishImpl(http, messages).async(new CompletionListener.ToCallback(listener));
+        publishImpl(http, messages).async(new CompletionListener.ToCallback<>(listener));
     }
 
-    private Http.Request<Void> publishImpl(Http http, final Message[] messages) {
-        return http.request(new Http.Execute<Void>() {
+    /**
+     * Asynchronously publish an array of messages on this channel
+     *
+     * @param messages the message
+     * @param callback a callback to be notified of the outcome of this message.
+     * <p>
+     * This callback is invoked on a background thread.
+     */
+    @NonBlocking
+    public void publishAsync(final Message[] messages, final Callback<PublishResult> callback) {
+        publishImpl(ably.http, messages).async(callback);
+    }
+
+    private Http.Request<PublishResult> publishImpl(Http http, final Message[] messages) {
+        return http.request(new Http.Execute<PublishResult>() {
             @Override
-            public void execute(HttpScheduler http, final Callback<Void> callback) throws AblyException {
+            public void execute(HttpScheduler http, final Callback<PublishResult> callback) throws AblyException {
                 /* handle message ids */
                 boolean hasClientSuppliedId = false;
                 for(Message message : messages) {
@@ -144,7 +225,15 @@ public class ChannelBase {
                 HttpCore.RequestBody requestBody = ably.options.useBinaryProtocol ? MessageSerializer.asMsgpackRequest(messages) : MessageSerializer.asJsonRequest(messages);
                 final Param[] params = ably.options.addRequestIds ? Param.array(Crypto.generateRandomRequestId()) : null; // RSC7c
 
-                http.post(basePath + "/messages", HttpUtils.defaultAcceptHeaders(ably.options.useBinaryProtocol), params, requestBody, null, true, callback);
+                // Create ResponseHandler from BodyHandler
+                HttpCore.BodyHandler<String> bodyHandler = PublishResult.getBodyHandler();
+                HttpCore.ResponseHandler<PublishResult> responseHandler = (response, error) -> {
+                    if (error != null) throw AblyException.fromErrorInfo(error);
+                    String[] serials = bodyHandler.handleResponseBody(response.contentType, response.body);
+                    return new PublishResult(serials);
+                };
+
+                http.post(basePath + "/messages", HttpUtils.defaultAcceptHeaders(ably.options.useBinaryProtocol), params, requestBody, responseHandler, true, callback);
             }
         });
     }
@@ -326,6 +415,7 @@ public class ChannelBase {
      * @return A {@link Message} object representing the latest version of the message.
      * @throws AblyException If the message cannot be retrieved or does not exist.
      */
+    @Blocking
     public Message getMessage(String serial) throws AblyException {
         return messageEditsMixin.getMessage(ably.http, serial);
     }
@@ -338,6 +428,7 @@ public class ChannelBase {
      * <p>
      * This callback is invoked on a background thread.
      */
+    @NonBlocking
     public void getMessageAsync(String serial, Callback<Message> callback) {
         messageEditsMixin.getMessageAsync(ably.http, serial, callback);
     }
@@ -352,9 +443,11 @@ public class ChannelBase {
      *                Only non-null fields will be applied to the existing message.
      * @param operation operation metadata such as clientId, description, or metadata in the version field
      * @throws AblyException If the update operation fails.
+     * @return A {@link UpdateDeleteResult} containing the updated message version serial.
      */
-    public void updateMessage(Message message, MessageOperation operation) throws AblyException {
-        messageEditsMixin.updateMessage(ably.http, message, operation);
+    @Blocking
+    public UpdateDeleteResult updateMessage(Message message, MessageOperation operation) throws AblyException {
+        return messageEditsMixin.updateMessage(ably.http, message, operation);
     }
 
     /**
@@ -366,9 +459,11 @@ public class ChannelBase {
      * @param message A {@link Message} object containing the fields to update and the serial identifier.
      *                Only non-null fields will be applied to the existing message.
      * @throws AblyException If the update operation fails.
+     * @return A {@link UpdateDeleteResult} containing the updated message version serial.
      */
-    public void updateMessage(Message message) throws AblyException {
-        updateMessage(message, null);
+    @Blocking
+    public UpdateDeleteResult updateMessage(Message message) throws AblyException {
+        return updateMessage(message, null);
     }
 
     /**
@@ -376,24 +471,26 @@ public class ChannelBase {
      *
      * @param message A {@link Message} object containing the fields to update and the serial identifier.
      * @param operation operation metadata such as clientId, description, or metadata in the version field
-     * @param listener A listener to be notified of the outcome of this operation.
+     * @param callback A callback to be notified of the outcome of this operation.
      * <p>
-     * This listener is invoked on a background thread.
+     * This callback is invoked on a background thread.
      */
-    public void updateMessageAsync(Message message, MessageOperation operation, CompletionListener listener) {
-        messageEditsMixin.updateMessageAsync(ably.http, message, operation, listener);
+    @NonBlocking
+    public void updateMessageAsync(Message message, MessageOperation operation, Callback<UpdateDeleteResult> callback) {
+        messageEditsMixin.updateMessageAsync(ably.http, message, operation, callback);
     }
 
     /**
      * Asynchronously updates an existing message.
      *
      * @param message A {@link Message} object containing the fields to update and the serial identifier.
-     * @param listener A listener to be notified of the outcome of this operation.
+     * @param callback A callback to be notified of the outcome of this operation.
      * <p>
-     * This listener is invoked on a background thread.
+     * This callback is invoked on a background thread.
      */
-    public void updateMessageAsync(Message message, CompletionListener listener) {
-        updateMessageAsync(message, null, listener);
+    @NonBlocking
+    public void updateMessageAsync(Message message, Callback<UpdateDeleteResult> callback) {
+        updateMessageAsync(message, null, callback);
     }
 
     /**
@@ -406,9 +503,11 @@ public class ChannelBase {
      * @param message A {@link Message} message containing the serial identifier.
      * @param operation operation metadata such as clientId, description, or metadata in the version field
      * @throws AblyException If the delete operation fails.
+     * @return A {@link UpdateDeleteResult} containing the deleted message version serial.
      */
-    public void deleteMessage(Message message, MessageOperation operation) throws AblyException {
-        messageEditsMixin.deleteMessage(ably.http, message, operation);
+    @Blocking
+    public UpdateDeleteResult deleteMessage(Message message, MessageOperation operation) throws AblyException {
+        return messageEditsMixin.deleteMessage(ably.http, message, operation);
     }
 
     /**
@@ -420,9 +519,11 @@ public class ChannelBase {
      *
      * @param message A {@link Message} message containing the serial identifier.
      * @throws AblyException If the delete operation fails.
+     * @return A {@link UpdateDeleteResult} containing the deleted message version serial.
      */
-    public void deleteMessage(Message message) throws AblyException {
-        deleteMessage(message, null);
+    @Blocking
+    public UpdateDeleteResult deleteMessage(Message message) throws AblyException {
+        return deleteMessage(message, null);
     }
 
     /**
@@ -430,24 +531,78 @@ public class ChannelBase {
      *
      * @param message A {@link Message} object containing the serial identifier and operation metadata.
      * @param operation operation metadata such as clientId, description, or metadata in the version field
-     * @param listener A listener to be notified of the outcome of this operation.
+     * @param callback A callback to be notified of the outcome of this operation.
      * <p>
-     * This listener is invoked on a background thread.
+     * This callback is invoked on a background thread.
      */
-    public void deleteMessageAsync(Message message, MessageOperation operation, CompletionListener listener) {
-        messageEditsMixin.deleteMessageAsync(ably.http, message, operation, listener);
+    @NonBlocking
+    public void deleteMessageAsync(Message message, MessageOperation operation, Callback<UpdateDeleteResult> callback) {
+        messageEditsMixin.deleteMessageAsync(ably.http, message, operation, callback);
     }
 
     /**
      * Asynchronously marks a message as deleted.
      *
      * @param message A {@link Message} object containing the serial identifier and operation metadata.
-     * @param listener A listener to be notified of the outcome of this operation.
+     * @param callback A callback to be notified of the outcome of this operation.
      * <p>
-     * This listener is invoked on a background thread.
+     * This callback is invoked on a background thread.
      */
-    public void deleteMessageAsync(Message message, CompletionListener listener) {
-        deleteMessageAsync(message, null, listener);
+    @NonBlocking
+    public void deleteMessageAsync(Message message, Callback<UpdateDeleteResult> callback) {
+        deleteMessageAsync(message, null, callback);
+    }
+
+    /**
+     * Appends message text to the end of the message.
+     *
+     * @param message  A {@link Message} object containing the serial identifier and data to append.
+     * @param operation operation details such as clientId, description, or metadata
+     * @return A {@link UpdateDeleteResult} containing the updated message version serial.
+     * @throws AblyException If the append operation fails.
+     */
+    @Blocking
+    public UpdateDeleteResult appendMessage(Message message, MessageOperation operation) throws AblyException {
+        return messageEditsMixin.appendMessage(ably.http, message, operation);
+    }
+
+    /**
+     * Appends message text to the end of the message.
+     *
+     * @param message  A {@link Message} object containing the serial identifier and data to append.
+     * @return A {@link UpdateDeleteResult} containing the updated message version serial.
+     * @throws AblyException If the append operation fails.
+     */
+    @Blocking
+    public UpdateDeleteResult appendMessage(Message message) throws AblyException {
+        return appendMessage(message, null);
+    }
+
+    /**
+     * Asynchronously appends message text to the end of the message.
+     *
+     * @param message  A {@link Message} object containing the serial identifier and data to append.
+     * @param operation operation details such as clientId, description, or metadata
+     * @param callback A callback to be notified of the outcome of this operation.
+     * <p>
+     * This callback is invoked on a background thread.
+     */
+    @NonBlocking
+    public void appendMessageAsync(Message message, MessageOperation operation, Callback<UpdateDeleteResult> callback) {
+        messageEditsMixin.appendMessageAsync(ably.http, message, operation, callback);
+    }
+
+    /**
+     * Asynchronously appends message text to the end of the message.
+     *
+     * @param message  A {@link Message} object containing the serial identifier and data to append.
+     * @param callback A callback to be notified of the outcome of this operation.
+     * <p>
+     * This callback is invoked on a background thread.
+     */
+    @NonBlocking
+    public void appendMessageAsync(Message message, Callback<UpdateDeleteResult> callback) {
+        appendMessageAsync(message, null, callback);
     }
 
     /**
@@ -463,6 +618,7 @@ public class ChannelBase {
      *         representing all versions of the message.
      * @throws AblyException If the versions cannot be retrieved.
      */
+    @Blocking
     public PaginatedResult<Message> getMessageVersions(String serial, Param[] params) throws AblyException {
         return messageEditsMixin.getMessageVersions(ably.http, serial, params);
     }
@@ -474,6 +630,7 @@ public class ChannelBase {
      * @param params Query parameters for filtering or pagination.
      * @param callback A callback to handle the result asynchronously.
      */
+    @NonBlocking
     public void getMessageVersionsAsync(String serial, Param[] params, Callback<AsyncPaginatedResult<Message>> callback) throws AblyException {
         messageEditsMixin.getMessageVersionsAsync(ably.http, serial, params, callback);
     }

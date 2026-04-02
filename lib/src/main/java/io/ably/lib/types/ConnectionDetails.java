@@ -73,6 +73,18 @@ public class ConnectionDetails {
      * Spec: CD2f, RTN14e, DF1a
      */
     public Long connectionStateTtl;
+    /**
+     * An opaque string identifying the server instance that the client is connected to.
+     * Used as a key in siteTimeserials maps for LiveObjects operations.
+     * <p>
+     * Spec: CD2j
+     */
+    public String siteCode;
+
+    /**
+     * The duration in milliseconds used to retain tombstoned objects at client side.
+     */
+    public Long objectsGCGracePeriod;
 
     ConnectionDetails() {
         maxIdleInterval = Defaults.maxIdleInterval;
@@ -113,6 +125,12 @@ public class ConnectionDetails {
                     break;
                 case "connectionStateTtl":
                     connectionStateTtl = unpacker.unpackLong();
+                    break;
+                case "siteCode":
+                    siteCode = unpacker.unpackString();
+                    break;
+                case "objectsGCGracePeriod":
+                    objectsGCGracePeriod = unpacker.unpackLong();
                     break;
                 default:
                     Log.v(TAG, "Unexpected field: " + fieldName);

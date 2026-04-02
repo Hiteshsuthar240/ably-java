@@ -2,22 +2,28 @@ package io.ably.lib.objects
 
 import io.ably.lib.realtime.ChannelState
 import io.ably.lib.realtime.CompletionListener
+import io.ably.lib.types.Callback
+import io.ably.lib.realtime.ConnectionEvent
+import io.ably.lib.realtime.ConnectionStateListener
 import io.ably.lib.types.ChannelMode
 import io.ably.lib.types.ErrorInfo
 import io.ably.lib.types.ProtocolMessage
+import io.ably.lib.types.PublishResult
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+internal val ObjectsAdapter.connectionManager get() = connection.connectionManager
+
 /**
  * Spec: RTO15g
  */
-internal suspend fun ObjectsAdapter.sendAsync(message: ProtocolMessage) = suspendCancellableCoroutine { continuation ->
+internal suspend fun ObjectsAdapter.sendAsync(message: ProtocolMessage): PublishResult = suspendCancellableCoroutine { continuation ->
   try {
-    connectionManager.send(message, clientOptions.queueMessages, object : CompletionListener {
-      override fun onSuccess() {
-        continuation.resume(Unit)
+    connectionManager.send(message, clientOptions.queueMessages, object : Callback<PublishResult> {
+      override fun onSuccess(result: PublishResult) {
+        continuation.resume(result)
       }
 
       override fun onError(reason: ErrorInfo) {
@@ -43,6 +49,16 @@ internal suspend fun ObjectsAdapter.attachAsync(channelName: String) = suspendCa
   } catch (e: Exception) {
     continuation.resumeWithException(e)
   }
+}
+
+internal fun ObjectsAdapter.onGCGracePeriodUpdated(block : (Long?) -> Unit) : ObjectsSubscription {
+  connectionManager.objectsGCGracePeriod?.let { block(it) }
+  // Return new objectsGCGracePeriod whenever connection state changes to connected
+  val listener: (_: ConnectionStateListener.ConnectionStateChange) -> Unit = {
+    block(connectionManager.objectsGCGracePeriod)
+  }
+  connection.on(ConnectionEvent.connected, listener)
+  return ObjectsSubscription { connection.off(listener) }
 }
 
 /**
@@ -159,26 +175,4 @@ internal fun ObjectsAdapter.throwIfEchoMessagesDisabled() {
    }
 }
 
-internal class Binary(val data: ByteArray) {
-  override fun equals(other: Any?): Boolean {
-    if (this === other) return true
-    if (other !is Binary) return false
-    return data.contentEquals(other.data)
-  }
 
-  override fun hashCode(): Int {
-    return data.contentHashCode()
-  }
-}
-
-internal fun Binary.size(): Int {
-  return data.size
-}
-
-internal data class CounterCreatePayload(
-  val counter: ObjectsCounter
-)
-
-internal data class MapCreatePayload(
-  val map: ObjectsMap
-)

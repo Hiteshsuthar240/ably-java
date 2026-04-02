@@ -31,6 +31,7 @@ import io.ably.lib.types.DecodingContext;
 import io.ably.lib.types.DeltaExtras;
 import io.ably.lib.types.ErrorInfo;
 import io.ably.lib.types.Message;
+import io.ably.lib.types.MessageAction;
 import io.ably.lib.types.MessageAnnotations;
 import io.ably.lib.types.MessageDecodeException;
 import io.ably.lib.types.MessageOperation;
@@ -42,12 +43,17 @@ import io.ably.lib.types.PresenceMessage;
 import io.ably.lib.types.ProtocolMessage;
 import io.ably.lib.types.ProtocolMessage.Action;
 import io.ably.lib.types.ProtocolMessage.Flag;
+import io.ably.lib.types.PublishResult;
 import io.ably.lib.types.Summary;
+import io.ably.lib.types.UpdateDeleteResult;
 import io.ably.lib.util.CollectionUtils;
 import io.ably.lib.util.EventEmitter;
+import io.ably.lib.util.Listeners;
 import io.ably.lib.util.Log;
 import io.ably.lib.util.ReconnectionStrategy;
 import io.ably.lib.util.StringUtils;
+import org.jetbrains.annotations.Blocking;
+import org.jetbrains.annotations.NonBlocking;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -431,6 +437,16 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
     }
 
     private static void callCompletionListenerError(CompletionListener listener, ErrorInfo err) {
+        if(listener != null) {
+            try {
+                listener.onError(err);
+            } catch(Throwable t) {
+                Log.e(TAG, "Unexpected exception calling CompletionListener", t);
+            }
+        }
+    }
+
+    private static void callCompletionListenerError(Callback<PublishResult> listener, ErrorInfo err) {
         if(listener != null) {
             try {
                 listener.onError(err);
@@ -1021,8 +1037,9 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      * @param data the message payload
      * @throws AblyException
      */
+    @NonBlocking
     public void publish(String name, Object data) throws AblyException {
-        publish(name, data, null);
+        publish(name, data, (Callback<PublishResult>) null);
     }
 
     /**
@@ -1033,8 +1050,9 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      * @param message A {@link Message} object.
      * @throws AblyException
      */
+    @NonBlocking
     public void publish(Message message) throws AblyException {
-        publish(message, null);
+        publish(message, (Callback<PublishResult>) null);
     }
 
     /**
@@ -1045,8 +1063,9 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      * @param messages An array of {@link Message} objects.
      * @throws AblyException
      */
+    @NonBlocking
     public void publish(Message[] messages) throws AblyException {
-        publish(messages, null);
+        publish(messages, (Callback<PublishResult>) null);
     }
 
     /**
@@ -1062,10 +1081,34 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      * <p>
      * This listener is invoked on a background thread.
      * @throws AblyException
+     * @deprecated Use {@link #publish(String, Object, Callback)} instead.
      */
+    @Deprecated
+    @NonBlocking
     public void publish(String name, Object data, CompletionListener listener) throws AblyException {
         Log.v(TAG, "publish(String, Object); channel = " + this.name + "; event = " + name);
         publish(new Message[] {new Message(name, data)}, listener);
+    }
+
+    /**
+     * Publishes a single message to the channel with the given event name and payload.
+     * When publish is called with this client library, it won't attempt to implicitly attach to the channel,
+     * so long as <a href="https://ably.com/docs/realtime/channels#transient-publish">transient publishing</a> is available in the library.
+     * Otherwise, the client will implicitly attach.
+     * <p>
+     * Spec: RTL6i
+     * @param name the event name
+     * @param data the message payload
+     * @param callback A callback may optionally be passed in to this call to be notified of success or failure of the operation,
+     *                 receiving a {@link PublishResult} with message serial(s) on success.
+     * <p>
+     * This callback is invoked on a background thread.
+     * @throws AblyException
+     */
+    @NonBlocking
+    public void publish(String name, Object data, Callback<PublishResult> callback) throws AblyException {
+        Log.v(TAG, "publish(String, Object); channel = " + this.name + "; event = " + name);
+        publish(new Message[] {new Message(name, data)}, callback);
     }
 
     /**
@@ -1078,10 +1121,31 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      * <p>
      * This listener is invoked on a background thread.
      * @throws AblyException
+     * @deprecated Use {@link #publish(Message, Callback)} instead.
      */
+    @Deprecated
+    @NonBlocking
     public void publish(Message message, CompletionListener listener) throws AblyException {
         Log.v(TAG, "publish(Message); channel = " + this.name + "; event = " + message.name);
         publish(new Message[] {message}, listener);
+    }
+
+    /**
+     * Publishes a message to the channel.
+     * When publish is called with this client library, it won't attempt to implicitly attach to the channel.
+     * <p>
+     * Spec: RTL6i
+     * @param message A {@link Message} object.
+     * @param callback A callback may optionally be passed in to this call to be notified of success or failure of the operation,
+     *                 receiving a {@link PublishResult} with message serial(s) on success.
+     * <p>
+     * This callback is invoked on a background thread.
+     * @throws AblyException
+     */
+    @NonBlocking
+    public void publish(Message message, Callback<PublishResult> callback) throws AblyException {
+        Log.v(TAG, "publish(Message); channel = " + this.name + "; event = " + message.name);
+        publish(new Message[] {message}, callback);
     }
 
     /**
@@ -1094,8 +1158,16 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      * <p>
      * This listener is invoked on a background thread.
      * @throws AblyException
+     * @deprecated Use {@link #publish(Message[], Callback)} instead.
      */
+    @Deprecated
+    @NonBlocking
     public synchronized void publish(Message[] messages, CompletionListener listener) throws AblyException {
+        publish(messages, Listeners.fromCompletionListener(listener));
+    }
+
+    @NonBlocking
+    public synchronized void publish(Message[] messages, Callback<PublishResult> listener) throws AblyException {
         Log.v(TAG, "publish(Message[]); channel = " + this.name);
         ConnectionManager connectionManager = ably.connection.connectionManager;
         ConnectionManager.State connectionState = connectionManager.getConnectionState();
@@ -1188,6 +1260,7 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      * @return A {@link Message} object representing the latest version of the message.
      * @throws AblyException If the message cannot be retrieved or does not exist.
      */
+    @Blocking
     public Message getMessage(String serial) throws AblyException {
         return messageEditsMixin.getMessage(ably.http, serial);
     }
@@ -1200,37 +1273,21 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      * <p>
      * This callback is invoked on a background thread.
      */
+    @NonBlocking
     public void getMessageAsync(String serial, Callback<Message> callback) {
         messageEditsMixin.getMessageAsync(ably.http, serial, callback);
     }
 
     /**
-     * Updates an existing message using patch semantics.
-     * <p>
-     * Non-null fields in the provided message (name, data, extras) will replace the corresponding
-     * fields in the existing message, while null fields will be left unchanged.
+     * Asynchronously updates an existing message.
      *
      * @param message A {@link Message} object containing the fields to update and the serial identifier.
-     *                Only non-null fields will be applied to the existing message.
-     * @param operation operation metadata such as clientId, description, or metadata in the version field
-     * @throws AblyException If the update operation fails.
-     */
-    public void updateMessage(Message message, MessageOperation operation) throws AblyException {
-        messageEditsMixin.updateMessage(ably.http, message, operation);
-    }
-
-    /**
-     * Updates an existing message using patch semantics.
      * <p>
-     * Non-null fields in the provided message (name, data, extras) will replace the corresponding
-     * fields in the existing message, while null fields will be left unchanged.
-     *
-     * @param message A {@link Message} object containing the fields to update and the serial identifier.
-     *                Only non-null fields will be applied to the existing message.
-     * @throws AblyException If the update operation fails.
+     * This callback is invoked on a background thread.
      */
+    @NonBlocking
     public void updateMessage(Message message) throws AblyException {
-        updateMessage(message, null);
+        updateMessage(message, null, null);
     }
 
     /**
@@ -1238,53 +1295,52 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      *
      * @param message A {@link Message} object containing the fields to update and the serial identifier.
      * @param operation operation metadata such as clientId, description, or metadata in the version field
-     * @param listener A listener to be notified of the outcome of this operation.
      * <p>
-     * This listener is invoked on a background thread.
+     * This callback is invoked on a background thread.
      */
-    public void updateMessageAsync(Message message, MessageOperation operation, CompletionListener listener) {
-        messageEditsMixin.updateMessageAsync(ably.http, message, operation, listener);
+    @NonBlocking
+    public void updateMessage(Message message, MessageOperation operation) throws AblyException {
+        updateMessage(message, operation, null);
     }
 
     /**
      * Asynchronously updates an existing message.
      *
      * @param message A {@link Message} object containing the fields to update and the serial identifier.
-     * @param listener A listener to be notified of the outcome of this operation.
-     * <p>
-     * This listener is invoked on a background thread.
-     */
-    public void updateMessageAsync(Message message, CompletionListener listener) {
-        updateMessageAsync(message, null, listener);
-    }
-
-    /**
-     * Marks a message as deleted.
-     * <p>
-     * This operation does not remove the message from history; it marks it as deleted
-     * while preserving the full message history. The deleted message can still be
-     * retrieved and will have its action set to MESSAGE_DELETE.
-     *
-     * @param message A {@link Message} message containing the serial identifier.
      * @param operation operation metadata such as clientId, description, or metadata in the version field
-     * @throws AblyException If the delete operation fails.
+     * @param listener A callback to be notified of the outcome of this operation.
+     * <p>
+     * This callback is invoked on a background thread.
      */
-    public void deleteMessage(Message message, MessageOperation operation) throws AblyException {
-        messageEditsMixin.deleteMessage(ably.http, message, operation);
+    @NonBlocking
+    public void updateMessage(Message message, MessageOperation operation, Callback<UpdateDeleteResult> listener) throws AblyException {
+        Log.v(TAG, "updateMessage(Message); channel = " + this.name + "; serial = " + message.serial);
+        updateDeleteImpl(message, operation, MessageAction.MESSAGE_UPDATE, listener);
     }
 
     /**
-     * Marks a message as deleted.
-     * <p>
-     * This operation does not remove the message from history; it marks it as deleted
-     * while preserving the full message history. The deleted message can still be
-     * retrieved and will have its action set to MESSAGE_DELETE.
+     * Asynchronously updates an existing message.
      *
-     * @param message A {@link Message} message containing the serial identifier.
-     * @throws AblyException If the delete operation fails.
+     * @param message A {@link Message} object containing the fields to update and the serial identifier.
+     * @param listener A callback to be notified of the outcome of this operation.
+     * <p>
+     * This callback is invoked on a background thread.
      */
+    @NonBlocking
+    public void updateMessage(Message message, Callback<UpdateDeleteResult> listener) throws AblyException {
+        updateMessage(message, null, listener);
+    }
+
+    /**
+     * Asynchronously marks a message as deleted.
+     *
+     * @param message A {@link Message} object containing the serial identifier and operation metadata.
+     * <p>
+     * This callback is invoked on a background thread.
+     */
+    @NonBlocking
     public void deleteMessage(Message message) throws AblyException {
-        deleteMessage(message, null);
+        deleteMessage(message, null, null);
     }
 
     /**
@@ -1292,24 +1348,141 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      *
      * @param message A {@link Message} object containing the serial identifier and operation metadata.
      * @param operation operation metadata such as clientId, description, or metadata in the version field
-     * @param listener A listener to be notified of the outcome of this operation.
      * <p>
-     * This listener is invoked on a background thread.
+     * This callback is invoked on a background thread.
      */
-    public void deleteMessageAsync(Message message, MessageOperation operation, CompletionListener listener) {
-        messageEditsMixin.deleteMessageAsync(ably.http, message, operation, listener);
+    @NonBlocking
+    public void deleteMessage(Message message, MessageOperation operation) throws AblyException {
+        deleteMessage(message, operation, null);
     }
 
     /**
      * Asynchronously marks a message as deleted.
      *
      * @param message A {@link Message} object containing the serial identifier and operation metadata.
-     * @param listener A listener to be notified of the outcome of this operation.
+     * @param operation operation metadata such as clientId, description, or metadata in the version field
+     * @param listener A callback to be notified of the outcome of this operation.
      * <p>
-     * This listener is invoked on a background thread.
+     * This callback is invoked on a background thread.
      */
-    public void deleteMessageAsync(Message message, CompletionListener listener) {
-        deleteMessageAsync(message, null, listener);
+    @NonBlocking
+    public void deleteMessage(Message message, MessageOperation operation, Callback<UpdateDeleteResult> listener) throws AblyException {
+        Log.v(TAG, "deleteMessage(Message); channel = " + this.name + "; serial = " + message.serial);
+        updateDeleteImpl(message, operation, MessageAction.MESSAGE_DELETE, listener);
+    }
+
+    /**
+     * Asynchronously marks a message as deleted.
+     *
+     * @param message A {@link Message} object containing the serial identifier and operation metadata.
+     * @param callback A callback to be notified of the outcome of this operation.
+     * <p>
+     * This callback is invoked on a background thread.
+     */
+    @NonBlocking
+    public void deleteMessage(Message message, Callback<UpdateDeleteResult> callback) throws AblyException {
+        deleteMessage(message, null, callback);
+    }
+
+    /**
+     * Asynchronously appends message text to the end of the message data.
+     *
+     * @param message  A {@link Message} object containing the serial identifier and data to append.
+     * <p>
+     * This callback is invoked on a background thread.
+     */
+    @NonBlocking
+    public void appendMessage(Message message) throws AblyException {
+        appendMessage(message, null, null);
+    }
+
+    /**
+     * Asynchronously appends message text to the end of the message.
+     *
+     * @param message  A {@link Message} object containing the serial identifier and data to append.
+     * @param operation operation details such as clientId, description, or metadata
+     * <p>
+     * This callback is invoked on a background thread.
+     */
+    @NonBlocking
+    public void appendMessage(Message message, MessageOperation operation) throws AblyException {
+        appendMessage(message, operation, null);
+    }
+
+    /**
+     * Asynchronously appends message text to the end of the message.
+     *
+     * @param message  A {@link Message} object containing the serial identifier and data to append.
+     * @param operation operation details such as clientId, description, or metadata
+     * @param listener A callback to be notified of the outcome of this operation.
+     * <p>
+     * This callback is invoked on a background thread.
+     */
+    @NonBlocking
+    public void appendMessage(Message message, MessageOperation operation, Callback<UpdateDeleteResult> listener) throws AblyException {
+        Log.v(TAG, "appendMessage(Message); channel = " + this.name + "; serial = " + message.serial);
+        updateDeleteImpl(message, operation, MessageAction.MESSAGE_APPEND, listener);
+    }
+
+    /**
+     * Asynchronously appends message text to the end of the message.
+     *
+     * @param message  A {@link Message} object containing the serial identifier and data to append.
+     * @param callback A callback to be notified of the outcome of this operation.
+     * <p>
+     * This callback is invoked on a background thread.
+     */
+    @NonBlocking
+    public void appendMessage(Message message, Callback<UpdateDeleteResult> callback) throws AblyException {
+        appendMessage(message, null, callback);
+    }
+
+    private void updateDeleteImpl(
+        Message message,
+        MessageOperation operation,
+        MessageAction action,
+        Callback<UpdateDeleteResult> listener
+    ) throws AblyException {
+        if (message.serial == null || message.serial.isEmpty()) {
+            throw AblyException.fromErrorInfo(new ErrorInfo("Message serial cannot be empty", 400, 40003));
+        }
+        ConnectionManager connectionManager = ably.connection.connectionManager;
+        ConnectionManager.State connectionState = connectionManager.getConnectionState();
+        boolean queueMessages = ably.options.queueMessages;
+        if (!connectionManager.isActive() || (connectionState.queueEvents && !queueMessages)) {
+            throw AblyException.fromErrorInfo(connectionState.defaultErrorInfo);
+        }
+        boolean connected = (connectionState.sendEvents);
+
+        Message updatedMessage = new Message(message.name, message.data, message.extras);
+        updatedMessage.serial = message.serial;
+        updatedMessage.action = action;
+        updatedMessage.version = new MessageVersion();
+        if (operation != null) {
+            updatedMessage.version.clientId = operation.clientId;
+            updatedMessage.version.description = operation.description;
+            updatedMessage.version.metadata = operation.metadata;
+        }
+
+        try {
+            ably.auth.checkClientId(message, true, connected);
+            updatedMessage.encode(options);
+        } catch (AblyException e) {
+            if (listener != null) {
+                listener.onError(e.errorInfo);
+            }
+            return;
+        }
+
+        ProtocolMessage msg = new ProtocolMessage(Action.message, this.name);
+        msg.messages = new Message[] { updatedMessage };
+        try {
+            connectionManager.send(msg, queueMessages, Listeners.toPublishResultListener(listener));
+        } catch (AblyException e) {
+            if (listener != null) {
+                listener.onError(e.errorInfo);
+            }
+        }
     }
 
     /**
@@ -1325,6 +1498,7 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      *         representing all versions of the message.
      * @throws AblyException If the versions cannot be retrieved.
      */
+    @Blocking
     public PaginatedResult<Message> getMessageVersions(String serial, Param[] params) throws AblyException {
         return messageEditsMixin.getMessageVersions(ably.http, serial, params);
     }
@@ -1336,6 +1510,7 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      * @param params Query parameters for filtering or pagination.
      * @param callback A callback to handle the result asynchronously.
      */
+    @NonBlocking
     public void getMessageVersionsAsync(String serial, Param[] params, Callback<AsyncPaginatedResult<Message>> callback) throws AblyException {
         messageEditsMixin.getMessageVersionsAsync(ably.http, serial, params, callback);
     }
@@ -1628,7 +1803,7 @@ public abstract class ChannelBase extends EventEmitter<ChannelEvent, ChannelStat
      */
     public void sendProtocolMessage(ProtocolMessage protocolMessage, CompletionListener listener) throws AblyException {
         ConnectionManager connectionManager = ably.connection.connectionManager;
-        connectionManager.send(protocolMessage, ably.options.queueMessages, listener);
+        connectionManager.send(protocolMessage, ably.options.queueMessages, Listeners.fromCompletionListener(listener));
     }
 
     private static final String TAG = Channel.class.getName();

@@ -3,7 +3,7 @@ package io.ably.lib.objects.type
 import io.ably.lib.objects.ObjectMessage
 import io.ably.lib.objects.ObjectOperation
 import io.ably.lib.objects.ObjectState
-import io.ably.lib.objects.ObjectsPoolDefaults
+import io.ably.lib.objects.ObjectsOperationSource
 import io.ably.lib.objects.objectError
 import io.ably.lib.objects.type.livecounter.noOpCounterUpdate
 import io.ably.lib.objects.type.livemap.noOpMapUpdate
@@ -47,7 +47,7 @@ internal abstract class BaseRealtimeObject(
    * @spec RTLM6/RTLC6 - Overrides ObjectMessage with object data state from sync to LiveMap/LiveCounter
    */
   internal fun applyObjectSync(objectMessage: ObjectMessage): ObjectUpdate {
-    val objectState = objectMessage.objectState as ObjectState // we have non-null objectState here due to RTO5b
+    val objectState = objectMessage.objectState as ObjectState // we have non-null objectState here due to RTO5f
     validate(objectState)
     // object's site serials are still updated even if it is tombstoned, so always use the site serials received from the operation.
     // should default to empty map if site serials do not exist on the object state, so that any future operation may be applied to this object.
@@ -66,11 +66,11 @@ internal abstract class BaseRealtimeObject(
 
   /**
    * This is invoked by ObjectMessage having updated data with parent `ProtocolMessageAction` as `object`
-   * @return an update describing the changes
+   * @return true if the operation was meaningfully applied, false otherwise
    *
    * @spec RTLM15/RTLC7 - Applies ObjectMessage with object data operations to LiveMap/LiveCounter
    */
-  internal fun applyObject(objectMessage: ObjectMessage) {
+  internal fun applyObject(objectMessage: ObjectMessage, source: ObjectsOperationSource): Boolean {
     validateObjectId(objectMessage.operation?.objectId)
 
     val msgTimeSerial = objectMessage.serial
@@ -84,17 +84,18 @@ internal abstract class BaseRealtimeObject(
         "Skipping ${objectOperation.action} op: op serial $msgTimeSerial <= site serial ${siteTimeserials[msgSiteCode]}; " +
           "objectId=$objectId"
       )
-      return
+      return false // RTLC7b / RTLM15b
     }
-    // should update stored site serial immediately. doesn't matter if we successfully apply the op,
-    // as it's important to mark that the op was processed by the object
-    siteTimeserials[msgSiteCode!!] = msgTimeSerial!! // RTLC7c, RTLM15c
+    // RTLC7c / RTLM15c - only update siteTimeserials for CHANNEL source
+    if (source == ObjectsOperationSource.CHANNEL) {
+      siteTimeserials[msgSiteCode!!] = msgTimeSerial!! // RTLC7c, RTLM15c
+    }
 
     if (isTombstoned) {
       // this object is tombstoned so the operation cannot be applied
-      return
+      return false // RTLC7e / RTLM15e
     }
-    applyObjectOperation(objectOperation, objectMessage) // RTLC7d
+    return applyObjectOperation(objectOperation, objectMessage) // RTLC7d
   }
 
   /**
@@ -136,10 +137,20 @@ internal abstract class BaseRealtimeObject(
 
   /**
    * Checks if the object is eligible for garbage collection.
+   *
+   * An object is eligible for garbage collection if it has been tombstoned and
+   * the time since tombstoning exceeds the specified grace period.
+   *
+   * @param gcGracePeriod The grace period in milliseconds that tombstoned objects
+   *                      should be kept before being eligible for collection.
+   *                      This value is retrieved from the server's connection details
+   *                      or defaults to 24 hours if not provided by the server.
+   * @return true if the object is tombstoned and the grace period has elapsed,
+   *         false otherwise
    */
-  internal fun isEligibleForGc(): Boolean {
+  internal fun isEligibleForGc(gcGracePeriod: Long): Boolean {
     val currentTime = System.currentTimeMillis()
-    return isTombstoned && tombstonedAt?.let { currentTime - it >= ObjectsPoolDefaults.GC_GRACE_PERIOD_MS } == true
+    return isTombstoned && tombstonedAt?.let { currentTime - it >= gcGracePeriod } == true
   }
 
   /**
@@ -166,9 +177,10 @@ internal abstract class BaseRealtimeObject(
    *
    * @param operation The operation containing the action and data to apply
    * @param message The complete object message containing the operation
+   * @return true if the operation was meaningfully applied, false otherwise
    *
    */
-  abstract fun applyObjectOperation(operation: ObjectOperation, message: ObjectMessage)
+  abstract fun applyObjectOperation(operation: ObjectOperation, message: ObjectMessage): Boolean
 
   /**
    * Clears the object's data and returns an update describing the changes.
@@ -195,12 +207,22 @@ internal abstract class BaseRealtimeObject(
   /**
    * Called during garbage collection intervals to clean up expired entries.
    *
+   * This method is invoked periodically (every 5 minutes) by the ObjectsPool
+   * to perform cleanup of tombstoned data that has exceeded the grace period.
+   *
    * This method should identify and remove entries that:
    * - Have been marked as tombstoned
-   * - Have a tombstone timestamp older than the configured grace period
+   * - Have a tombstone timestamp older than the specified grace period
+   *
+   * @param gcGracePeriod The grace period in milliseconds that tombstoned entries
+   *                      should be kept before being eligible for removal.
+   *                      This value is retrieved from the server's connection details
+   *                      or defaults to 24 hours if not provided by the server.
+   *                      Must be greater than 2 minutes to ensure proper operation
+   *                      ordering and avoid issues with delayed operations.
    *
    * Implementations typically use single-pass removal techniques to
    * efficiently clean up expired data without creating temporary collections.
    */
-  abstract fun onGCInterval()
+  abstract fun onGCInterval(gcGracePeriod: Long)
 }

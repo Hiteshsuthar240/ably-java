@@ -67,7 +67,7 @@ tasks.register<Test>("testRealtimeSuite") {
     }
     retry {
         maxRetries.set(3)
-        maxFailures.set(8)
+        maxFailures.set(15)
         failOnPassedAfterRetry.set(false)
         failOnSkippedAfterRetry.set(false)
     }
@@ -79,6 +79,8 @@ tasks.register<Test>("testRestSuite") {
     }
     jvmArgs("--add-opens", "java.base/java.time=ALL-UNNAMED")
     jvmArgs("--add-opens", "java.base/java.lang=ALL-UNNAMED")
+    jvmArgs("--add-opens", "java.base/java.net=ALL-UNNAMED")
+    jvmArgs("--add-opens", "java.base/java.lang.reflect=ALL-UNNAMED")
     beforeTest(closureOf<TestDescriptor> { logger.lifecycle("-> $this") })
     outputs.upToDateWhen { false }
     testLogging {

@@ -28,15 +28,18 @@ import io.ably.lib.transport.ITransport.ConnectListener;
 import io.ably.lib.transport.ITransport.TransportParams;
 import io.ably.lib.transport.NetworkConnectivity.NetworkConnectivityListener;
 import io.ably.lib.types.AblyException;
+import io.ably.lib.types.Callback;
 import io.ably.lib.types.ClientOptions;
 import io.ably.lib.types.ConnectionDetails;
 import io.ably.lib.types.ErrorInfo;
 import io.ably.lib.types.Param;
 import io.ably.lib.types.ProtocolMessage;
 import io.ably.lib.types.ProtocolSerializer;
+import io.ably.lib.types.PublishResult;
 import io.ably.lib.util.Log;
 import io.ably.lib.util.PlatformAgentProvider;
 import io.ably.lib.util.ReconnectionStrategy;
+import org.jetbrains.annotations.Nullable;
 
 public class ConnectionManager implements ConnectListener {
     final ExecutorService singleThreadExecutor = Executors.newSingleThreadExecutor();
@@ -101,6 +104,7 @@ public class ConnectionManager implements ConnectListener {
      * This field is initialized only if the LiveObjects plugin is present in the classpath.
      */
     private final LiveObjectsPlugin liveObjectsPlugin;
+    public Long objectsGCGracePeriod = null;
 
     /**
      * Methods on the channels map owned by the {@link AblyRealtime} instance
@@ -599,13 +603,15 @@ public class ConnectionManager implements ConnectListener {
 
         protected void enactState() {
             if(change != null) {
+                // RTL3d1: implement the state change first, so channel states are updated
+                // before listeners observe the new connection state
+                states.get(stateIndication.state).enact(stateIndication, change);
+
                 if(change.current != change.previous) {
                     /* broadcast currentState change */
                     connection.onConnectionStateChange(change);
                 }
 
-                /* implement the state change */
-                states.get(stateIndication.state).enact(stateIndication, change);
                 if(currentState.terminal) {
                     clearTransport();
                 }
@@ -1315,6 +1321,8 @@ public class ConnectionManager implements ConnectListener {
         maxIdleInterval = connectionDetails.maxIdleInterval;
         connectionStateTtl = connectionDetails.connectionStateTtl;
         maxMessageSize = connectionDetails.maxMessageSize;
+        siteCode = connectionDetails.siteCode; // CD2j
+        objectsGCGracePeriod = connectionDetails.objectsGCGracePeriod;
 
         /* set the clientId resolved from token, if any */
         String clientId = connectionDetails.clientId;
@@ -1403,7 +1411,7 @@ public class ConnectionManager implements ConnectListener {
     }
 
     private void onAck(ProtocolMessage message) {
-        pendingMessages.ack(message.msgSerial, message.count, message.error);
+        pendingMessages.ack(message.msgSerial, message.count, message.res, message.error);
     }
 
     private void onNack(ProtocolMessage message) {
@@ -1724,14 +1732,14 @@ public class ConnectionManager implements ConnectListener {
 
     public static class QueuedMessage {
         public final ProtocolMessage msg;
-        public final CompletionListener listener;
-        public QueuedMessage(ProtocolMessage msg, CompletionListener listener) {
+        public final Callback<PublishResult> listener;
+        public QueuedMessage(ProtocolMessage msg, Callback<PublishResult> listener) {
             this.msg = msg;
             this.listener = listener;
         }
     }
 
-    public void send(ProtocolMessage msg, boolean queueEvents, CompletionListener listener) throws AblyException {
+    public void send(ProtocolMessage msg, boolean queueEvents, Callback<PublishResult> listener) throws AblyException {
         State state;
         synchronized(this) {
             state = this.currentState;
@@ -1747,7 +1755,7 @@ public class ConnectionManager implements ConnectListener {
         throw AblyException.fromErrorInfo(state.defaultErrorInfo);
     }
 
-    private void sendImpl(ProtocolMessage message, CompletionListener listener) throws AblyException {
+    private void sendImpl(ProtocolMessage message, Callback<PublishResult> listener) throws AblyException {
         if(transport == null) {
             Log.v(TAG, "sendImpl(): Discarding message; transport unavailable");
             return;
@@ -1825,7 +1833,7 @@ public class ConnectionManager implements ConnectListener {
             queue.add(msg);
         }
 
-        public void ack(long msgSerial, int count, ErrorInfo reason) {
+        public void ack(long msgSerial, int count, @Nullable PublishResult[] results, ErrorInfo reason) {
             QueuedMessage[] ackMessages = null, nackMessages = null;
             synchronized(this) {
                 if (queue.isEmpty()) return;
@@ -1867,11 +1875,14 @@ public class ConnectionManager implements ConnectListener {
                 }
             }
             if(ackMessages != null) {
-                for(QueuedMessage msg : ackMessages) {
+                for (int i = 0; i < ackMessages.length; i++) {
+                    QueuedMessage msg = ackMessages[i];
                     try {
-                        if(msg.listener != null)
-                            msg.listener.onSuccess();
-                    } catch(Throwable t) {
+                        if (msg.listener != null) {
+                            PublishResult messageResult = results != null && results.length > i ? results[i] : null;
+                            msg.listener.onSuccess(messageResult);
+                        }
+                    } catch (Throwable t) {
                         Log.e(TAG, "ack(): listener exception", t);
                     }
                 }
@@ -2027,6 +2038,7 @@ public class ConnectionManager implements ConnectListener {
     private CMConnectivityListener connectivityListener;
     private long connectionStateTtl = Defaults.connectionStateTtl;
     public int maxMessageSize = Defaults.maxMessageSize;
+    public String siteCode; // CD2j
     long maxIdleInterval = Defaults.maxIdleInterval;
     private int disconnectedRetryAttempt = 0;
 
